@@ -235,7 +235,7 @@ class WeixinPay(object):
         out_refund_no、total_fee、refund_fee、op_user_id为必填参数
         appid、mchid、nonce_str不需要填入
         """
-        if not self.key or not self.cert:
+        if not self.ssl_context:
             raise WeixinError("退款申请接口需要双向证书")
         url = "https://api.mch.weixin.qq.com/secapi/pay/refund"
         if "out_trade_no" not in data and "transaction_id" not in data:
@@ -249,7 +249,7 @@ class WeixinPay(object):
         if "op_user_id" not in data:
             raise WeixinPayError("退款申请接口中，缺少必填参数op_user_id");
 
-        return await self.fetch(url, data, True)
+        return await self.fetch(url, data)
 
     async def refund_query(self, **data):
         """
