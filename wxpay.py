@@ -82,25 +82,15 @@ class WeixinPayError(WeixinError):
 
 class WeixinPay(object):
 
-    def __init__(self, app_id, mch_id, mch_key,  key=None, cert=None, loop=None):
+    def __init__(self, app_id, mch_id, mch_key,  key=None, cert=None):
         self.app_id = app_id
         self.mch_id = mch_id
         self.mch_key = mch_key
-
-        self.loop = loop
-        if self.loop is None:
-            self.loop = asyncio.get_event_loop()
 
         self.ssl_context = None
         if key and cert:
             self.ssl_context = ssl.SSLContext()
             self.ssl_context.load_cert_chain(certfile=cert, keyfile=key)
-        self.connector = aiohttp.TCPConnector(ssl_context=self.ssl_context)
-        self.client_session = aiohttp.ClientSession(connector=self.connector, loop=self.loop)
-
-    @property
-    def remote_addr(self):
-        return ""
 
     @property
     def nonce_str(self):
@@ -133,14 +123,19 @@ class WeixinPay(object):
             raw[child.tag] = child.text
         return raw
 
-    async def fetch(self, url, data):
-        data.setdefault("appid", self.app_id)
-        data.setdefault("mch_id", self.mch_id)
-        data.setdefault("nonce_str", self.nonce_str)
-        data.setdefault("sign", self.sign(data))
+    async def fetch(self, url, data, setdefault=True, loop=None):
+        if setdefault:
+            data.setdefault("appid", self.app_id)
+            data.setdefault("mch_id", self.mch_id)
+            data.setdefault("nonce_str", self.nonce_str)
+            data.setdefault("sign", self.sign(data))
 
-        async with self.client_session as client:
-            async with client.post(url, data=self.to_xml(data).encode("utf-8")) as resp:
+        if loop is None:
+            loop = asyncio.get_event_loop()
+
+        connector = aiohttp.TCPConnector(ssl_context=self.ssl_context)
+        async with aiohttp.ClientSession(connector=connector, loop=loop) as session:
+            async with session.post(url, data=self.to_xml(data).encode("utf-8")) as resp:
                 content = await resp.text(encoding='utf-8')
 
         if "return_code" in content:
@@ -156,12 +151,11 @@ class WeixinPay(object):
         code = SUCCESS if ok else FAIL
         return self.to_xml(dict(return_code=code, return_msg=msg))
 
-    async def unified_order(self, **data):
+    async def unified_order(self, loop=None, **data):
         """
         统一下单
-        out_trade_no、body、total_fee、trade_type必填
+        out_trade_no、body、total_fee、spbill_create_ip、trade_type必填
         app_id, mchid, nonce_str自动填写
-        spbill_create_ip 在flask框架下可以自动填写, 非flask框架需要主动传入此参数
         """
         url = "https://api.mch.weixin.qq.com/pay/unifiedorder"
 
@@ -182,18 +176,17 @@ class WeixinPay(object):
             raise WeixinPayError("trade_type为JSAPI时，openid为必填参数")
         if data["trade_type"] == "NATIVE" and "product_id" not in data:
             raise WeixinPayError("trade_type为NATIVE时，product_id为必填参数")
-        data.setdefault("spbill_create_ip", self.remote_addr)
 
-        raw = await self.fetch(url, data)
+        raw = await self.fetch(url, data, loop=loop)
         return raw
 
-    async def jsapi(self, **kwargs):
+    async def jsapi(self, loop=None, **kwargs):
         """
         生成给JavaScript调用的数据
         详细规则参考 https://pay.weixin.qq.com/wiki/doc/api/jsapi.php?chapter=7_7&index=6
         """
         kwargs.setdefault("trade_type", "JSAPI")
-        raw = await self.unified_order(**kwargs)
+        raw = await self.unified_order(loop=loop, **kwargs)
         package = "prepay_id={0}".format(raw["prepay_id"])
         timestamp = str(int(time.time()))
         nonce_str = self.nonce_str
@@ -203,7 +196,7 @@ class WeixinPay(object):
         return dict(package=package, appId=self.app_id, timeStamp=timestamp,
                     nonceStr=nonce_str, signType="MD5", paySign=sign)
 
-    async def order_query(self, **data):
+    async def order_query(self, loop=None, **data):
         """
         订单查询
         out_trade_no, transaction_id至少填一个
@@ -214,9 +207,9 @@ class WeixinPay(object):
         if "out_trade_no" not in data and "transaction_id" not in data:
             raise WeixinPayError("订单查询接口中，out_trade_no、transaction_id至少填一个")
 
-        return await self.fetch(url, data)
+        return await self.fetch(url, data, loop=loop)
 
-    async def close_order(self, out_trade_no, **data):
+    async def close_order(self, out_trade_no, loop=None, **data):
         """
         关闭订单
         out_trade_no必填
@@ -226,9 +219,9 @@ class WeixinPay(object):
 
         data.setdefault("out_trace_no", out_trade_no)
 
-        return await self.fetch(url, data)
+        return await self.fetch(url, data, loop=loop)
 
-    async def refund(self, **data):
+    async def refund(self, loop=None, **data):
         """
         申请退款
         out_trade_no、transaction_id至少填一个且
@@ -241,17 +234,17 @@ class WeixinPay(object):
         if "out_trade_no" not in data and "transaction_id" not in data:
             raise WeixinPayError("退款申请接口中，out_trade_no、transaction_id至少填一个")
         if "out_refund_no" not in data:
-            raise WeixinPayError("退款申请接口中，缺少必填参数out_refund_no");
+            raise WeixinPayError("退款申请接口中，缺少必填参数out_refund_no")
         if "total_fee" not in data:
-            raise WeixinPayError("退款申请接口中，缺少必填参数total_fee");
+            raise WeixinPayError("退款申请接口中，缺少必填参数total_fee")
         if "refund_fee" not in data:
-            raise WeixinPayError("退款申请接口中，缺少必填参数refund_fee");
+            raise WeixinPayError("退款申请接口中，缺少必填参数refund_fee")
         if "op_user_id" not in data:
-            raise WeixinPayError("退款申请接口中，缺少必填参数op_user_id");
+            raise WeixinPayError("退款申请接口中，缺少必填参数op_user_id")
 
-        return await self.fetch(url, data)
+        return await self.fetch(url, data, loop=loop)
 
-    async def refund_query(self, **data):
+    async def refund_query(self, loop=None, **data):
         """
         查询退款
         提交退款申请后，通过调用该接口查询退款状态。退款有一定延时，
@@ -265,9 +258,9 @@ class WeixinPay(object):
                 and "transaction_id" not in data and "refund_id" not in data:
             raise WeixinPayError("退款查询接口中，out_refund_no、out_trade_no、transaction_id、refund_id四个参数必填一个")
 
-        return await self.fetch(url, data)
+        return await self.fetch(url, data, loop=loop)
 
-    async def download_bill(self, bill_date, bill_type="ALL", **data):
+    async def download_bill(self, bill_date, bill_type="ALL", loop=None, **data):
         """
         下载对账单
         bill_date、bill_type为必填参数
@@ -280,4 +273,58 @@ class WeixinPay(object):
         if "bill_date" not in data:
             raise WeixinPayError("对账单接口中，缺少必填参数bill_date")
 
-        return await self.fetch(url, data)
+        return await self.fetch(url, data, loop=loop)
+
+    async def transfers(self, check_name=False, loop=None, **data):
+        """
+        企业付款
+        用于企业向微信用户个人付款
+        目前支持向指定微信用户的openid付款
+
+        partner_trade_no、openid、amount、desc、spbill_create_ip必填
+        如果check_name为true，re_user_name必填
+        appid、mchid、nonce_str不需要填入
+        """
+        url = "https://api.mch.weixin.qq.com/mmpaymkttransfers/promotion/transfers"
+
+        if "partner_trade_no" not in data:
+            raise WeixinPayError("企业付款接口中，缺少必填参数partner_trade_no")
+        if "openid" not in data:
+            raise WeixinPayError("企业付款接口中，缺少必填参数openid")
+        if "amount" not in data:
+            raise WeixinPayError("企业付款接口中，缺少必填参数amount")
+        if "desc" not in data:
+            raise WeixinPayError("企业付款接口中，缺少必填参数desc")
+        if "spbill_create_ip" not in data:
+            raise WeixinPayError("企业付款接口中，缺少必填参数spbill_create_ip")
+        if check_name is True and "re_user_name" not in data:
+            raise WeixinPayError("企业付款接口中，缺少必填参数re_user_name")
+
+        if check_name is True:
+            data["check_name"] = "FORCE_CHECK"
+        else:
+            data["check_name"] = "NO_CHECK"
+
+        # 微信你坑啊
+        data["mch_appid"] = self.app_id
+        data["mchid"] = self.mch_id
+        data["nonce_str"] = self.nonce_str
+        data["sign"] = self.sign(data)
+
+        return await self.fetch(url, data, setdefault=False, loop=loop)
+
+    async def get_transfer_info(self, partner_trade_no, loop=None):
+        """
+        查询企业付款
+        用于商户的企业付款操作进行结果查询，返回付款操作详细结果。
+        查询企业付款API只支持查询30天内的订单，30天之前的订单请登录商户平台查询。
+
+        partner_trade_no必填
+        """
+        if not self.ssl_context:
+            raise WeixinError("查询企业付款接口需要双向证书")
+        url = "https://api.mch.weixin.qq.com/mmpaymkttransfers/gettransferinfo"
+
+        data = dict(partner_trade_no=partner_trade_no)
+
+        return await self.fetch(url, data, loop=loop)
